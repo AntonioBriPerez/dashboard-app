@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      containers:
+      - name: dashboard
+        image: dashboard-api:v1
+        # IMPORTANTE: 'Never' obliga a K3s a usar la imagen local que importamos
+        # con docker save. Si no, intentará bajarla de internet y fallará.
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 3000
+        env:
+        # Le decimos a Python dónde está el servidor Go (DNS interno de K8s)
+        - name: OAUTH_URL
+          value: "http://oauth-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-service
+spec:
+  selector:
+    app: dashboard
+  ports:
+    - protocol: TCP
+      port: 80         # Puerto expuesto del servicio (interno del clúster)
+      targetPort: 3000 # Puerto donde escucha FastAPI dentro del pod
