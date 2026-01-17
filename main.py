@@ -4,11 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import jwt
 import requests
 import os
+import time # <--- IMPORTANTE: Necesario para esperar entre reintentos
 
 app = FastAPI()
 
 # --- CONFIGURACIÓN CORS ---
-# Permite peticiones desde el navegador (Frontend)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,39 +19,46 @@ app.add_middleware(
 
 security = HTTPBearer()
 
-# URL interna de K8s para buscar la clave pública
 OAUTH_SERVER_URL = os.getenv("OAUTH_URL", "http://oauth-service")
 PUBLIC_KEY = None
 
 @app.on_event("startup")
 def startup_event():
-    """Al iniciar, descargamos la clave pública del servidor Go"""
+    """Descarga la clave pública con REINTENTOS automáticos (Resiliencia)"""
     global PUBLIC_KEY
-    try:
-        print(f"🔌 [Boot] Conectando a {OAUTH_SERVER_URL}/public-key...")
-        response = requests.get(f"{OAUTH_SERVER_URL}/public-key", timeout=10)
-        
-        if response.status_code == 200:
-            PUBLIC_KEY = response.content
-            print("✅ [Boot] Clave Pública cargada exitosamente.")
-        else:
-            print(f"⚠️ [Boot] Error: OAuth server respondió {response.status_code}")
+    
+    print(f"🔌 [Boot] Iniciando conexión con Auth Server en: {OAUTH_SERVER_URL}")
+    
+    while PUBLIC_KEY is None:
+        try:
+            print(f"   🔄 Intentando obtener clave pública...")
+            response = requests.get(f"{OAUTH_SERVER_URL}/public-key", timeout=5)
             
-    except Exception as e:
-        print(f"❌ [Boot] No se pudo conectar con OAuth Server: {e}")
+            if response.status_code == 200:
+                PUBLIC_KEY = response.content
+                print("✅ [Boot] Clave Pública cargada exitosamente. ¡Sistema listo!")
+            else:
+                print(f"⚠️ [Boot] El servidor respondió {response.status_code}. Reintentando en 3s...")
+                time.sleep(3)
+                
+        except requests.exceptions.ConnectionError:
+            print(f"❌ [Boot] Auth Server no responde (Connection Refused). ¿Está arrancando? Reintentando en 3s...")
+            time.sleep(3)
+        except Exception as e:
+            print(f"❌ [Boot] Error inesperado: {e}. Reintentando en 3s...")
+            time.sleep(3)
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Middleware: Valida matemáticamente la firma del token"""
     token = credentials.credentials
     
+    # Si por algún milagro llegamos aquí sin clave, intentamos una vez más (Lazy Loading)
     if not PUBLIC_KEY:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Sistema de Auth no disponible (Sin clave pública)"
+            detail="El sistema de Auth aún no está listo (Esperando clave pública)"
         )
 
     try:
-        # Decodificamos y validamos firma RS256
         payload = jwt.decode(token, PUBLIC_KEY, algorithms=["RS256"])
         return payload
     except jwt.ExpiredSignatureError:
@@ -63,7 +70,6 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 
 @app.get("/dashboard")
 def get_dashboard(user_data: dict = Depends(verify_token)):
-    print(f"🔓 Acceso concedido a: {user_data.get('sub')}")
     return {
         "status": "online",
         "secret_data": "CONFIDENCIAL: Los servidores están al 10% de carga.",
@@ -73,4 +79,5 @@ def get_dashboard(user_data: dict = Depends(verify_token)):
 
 @app.get("/health")
 def health():
+    # Health check simple para Kubernetes
     return {"status": "ok"}
